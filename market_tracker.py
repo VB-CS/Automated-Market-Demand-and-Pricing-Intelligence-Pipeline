@@ -1,12 +1,19 @@
 from serpapi import GoogleSearch
 import json
+import os
+from dotenv import load_dotenv
 
-# Your API Key from SerpApi Dashboard
+# Load the keys from the hidden .env file into system environment memory
+load_dotenv()
+
+# Securely grab the API key from environment memory
+API_KEY = os.getenv("SERPAPI_API_KEY")
+
 params = {
   "engine": "google_shopping",
   "q": "MacBook Pro M3",
   "location": "Austin, Texas, United States",
-  "api_key": "b01477bb312f2a15f48545f460490516a32559229ed9e18b3b703cfa2c1d5ff5"
+  "api_key": API_KEY 
 }
 
 # Connect and fetch data
@@ -20,4 +27,4 @@ if "shopping_results" in results:
         print(f"Price: {item.get('price')}")
         print("-" * 20)
 else:
-    print("Connection failed. Check your API key.")
+    print("Connection failed. Check your API key configuration.")
