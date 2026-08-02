@@ -1,126 +1,133 @@
-from serpapi import GoogleSearch
-import json
 import os
+import sys
 from dotenv import load_dotenv
 import psycopg2
+from serpapi import GoogleSearch
 
 
 load_dotenv()
 
+API_KEY = os.getenv("API_KEY") or os.getenv("SERPAPI_API_KEY")
 
-API_KEY = os.getenv("SERPAPI_API_KEY")
+
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
 
 
 TARGET_BASKET = [
-    "Corsair Vengeance DDR5 32GB 6000MHz",
     "G.Skill Trident Z5 RGB DDR5 32GB 6000MHz",
     "Crucial Pro DDR5 32GB 6000MHz",
     "G.Skill Trident Z5 DDR5 64GB 6400MHz"
 ]
 
+MIN_PRICE_FLOOR = 70.00
+
 clean_database_ready_list = []
 seen_listings = set()
 
+print("--------------------------------------------------")
+print("Initializing Price Gathering Pipeline from SerpApi")
+print("--------------------------------------------------")
 
 for product_name in TARGET_BASKET:
+    print(f"Requesting SerpApi Shopping Results for: {product_name}...")
+    
     params = {
         "engine": "google_shopping",
         "q": product_name,
         "location": "Austin, Texas, United States",
-        "api_key": API_KEY 
+        "api_key": API_KEY
     }
-
-
-    search = GoogleSearch(params)
-    results = search.get_dict()
-
+    
+    try:
+        search = GoogleSearch(params)
+        results = search.get_dict()
+    except Exception as e:
+        print(f"SerpApi Connection Error for {product_name}: {e}")
+        continue
 
     if "shopping_results" in results:
         for item in results["shopping_results"]:
-            
             title = item.get("title")
-            price = item.get("price")
+            price_raw = item.get("price")
             
-
-            if title is None or price is None:
-                continue 
+            # Guard Clause 1: Bypass missing values
+            if title is None or price_raw is None:
+                continue
                 
-            clean_price_string = price.replace("$", "").replace(",", "")
-            
-
+            # Parse price string to clean float (e.g. "$149.99" -> 149.99)
             try:
-
-                normalized_price = float(clean_price_string)
+                price_clean = float(price_raw.replace("$", "").replace(",", "").strip())
             except ValueError:
-
-                continue 
+                # Skip items with unparseable price formats
+                continue
                 
-            unique_identifier = (title, normalized_price)
-            
+            # Guard Clause 2: Safety Floor Constraint
+            # This completely eliminates accessories or outlier noise (e.g. $46.00)
+            if price_clean < MIN_PRICE_FLOOR:
+                continue
 
-            if unique_identifier not in seen_listings:
-                seen_listings.add(unique_identifier)
-                
+# Normalized title for cleaner tracking & partition groupings
+            normalized_title = product_name.lower().strip()
 
-                item["price"] = normalized_price
-                clean_database_ready_list.append(item)
-                
-                print(f"Clean Product: {title}")
-                print(f"Clean Price: {normalized_price}")
-                print("-" * 20)
-            raw_title = item.get("title")
+# Guard Clause 3: In-Memory Deduplication (Title + Price Tuple)
+# MUST use normalized_title here so subtle raw string differences don't bypass deduplication
+            listing_fingerprint = (normalized_title, price_clean)
 
+            if listing_fingerprint in seen_listings:
+                continue
 
-            machine_friendly_title = raw_title.lower().strip()
+            seen_listings.add(listing_fingerprint)
+            clean_database_ready_list.append((title, normalized_title, price_clean))
 
+print("\n--------------------------------------------------")
+print(f"Total Filtered & Cleaned Items: {len(clean_database_ready_list)}")
+print("--------------------------------------------------")
 
-            item["display_title"] = raw_title
-            item["normalized_title"] = machine_friendly_title
+if not clean_database_ready_list:
+    print("No clean records to write. Database transaction skipped.")
+    sys.exit(0)
 
-
-print(f"Total Cleaned Items Across All Searches: {len(clean_database_ready_list)}")
-
-# --- DATABASE INJECTION ---
-
-print("\nConnecting to PostgreSQL...")
+conn = None
+cursor = None
 
 try:
-
+    print("Connecting to local PostgreSQL database...")
     conn = psycopg2.connect(
-        dbname="victorbassey", 
-        user="victorbassey", 
-        host="localhost",
-        port="5432"
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT
     )
     cursor = conn.cursor()
-
-
-    for item in clean_database_ready_list:
-        insert_query = """
-            INSERT INTO market_pricing (display_title, normalized_title, price)
-            VALUES (%s, %s, %s);
-        """
-        
-
-        record_to_insert = (
-            item["display_title"],
-            item["normalized_title"],
-            item["price"] 
-        )
-        
-
-        cursor.execute(insert_query, record_to_insert)
-
-
+    
+    # Secure, parameterized batch insert
+    insert_query = """
+        INSERT INTO market_pricing (display_title, normalized_title, price)
+        VALUES (%s, %s, %s);
+    """
+    
+    print(f"Inserting {len(clean_database_ready_list)} rows securely into 'market_pricing'...")
+    cursor.executemany(insert_query, clean_database_ready_list)
+    
+    # Commit changes permanently to database log
     conn.commit()
-    print(f"Successfully saved {len(clean_database_ready_list)} records to SQL!")
+    print("Database Commit Successful! Data safely stored.")
 
-except Exception as e:
-    print(f"Database Error: {e}")
+except Exception as db_error:
+    # Safe Rollback on error to protect database transaction consistency
+    if conn:
+        conn.rollback()
+    print(f"CRITICAL - Database Transaction Failed: {db_error}")
 
 finally:
-
-    if conn:
+    if cursor:
         cursor.close()
+    if conn:
         conn.close()
-        print("PostgreSQL connection closed.")
+        print("PostgreSQL connection pool cleanly closed.")
+    print("Pipeline Execution Completed.")
