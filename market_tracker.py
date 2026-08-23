@@ -54,11 +54,11 @@ for product_name in TARGET_BASKET:
             title = item.get("title")
             price_raw = item.get("price")
             
-            # Guard Clause 1: Bypass missing values
+            # Guard Clause 1: Bypass missing values // Data Cleaning 
             if title is None or price_raw is None:
                 continue
                 
-            # Parse price string to clean float (e.g. "$149.99" -> 149.99)
+            # Parse price string to clean float (e.g. "$149.99" -> 149.99) Data Normalization
             try:
                 price_clean = float(price_raw.replace("$", "").replace(",", "").strip())
             except ValueError:
